@@ -1,0 +1,467 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" >
+
+<head>
+    <title>Boundary Check</title>
+    <link rel=stylesheet href="http://winleak.sourceforge.net/code.css" type="text/css" /> 
+</head>
+<body>
+<h1>Boundary Check</h1>
+Testing different approaches to automatic detection of out-of-bound memory accesses, for dynamically allocated memory.
+<br /><br />
+<a href="http://winleak.sourceforge.net/">Back to <b>Windows Leaks Detector</b> project home page</a><br />
+<a href="http://sourceforge.net/projects/winleak/">Back to Summary page</a><br />
+<br />
+<a href="http://winleak.sourceforge.net/articles/boundarycheck.cpp">download <i>boundarycheck.cpp</i></a><br />
+<br />
+<div class=code>
+<font class=comment>
+///////////////////////////////////////////////////////////<br>
+// boundarycheck.cpp, v1.1<br>
+//<br>
+// <b>Windows Leaks Detector</b>, 2006<br>
+// <a class=comment href="http://sourceforge.net/projects/winleak">http://sourceforge.net/projects/winleak</a><br>
+// <a class=comment href="mailto:migosh@users.sourceforge.net">migosh@users.sourceforge.net</a><br>
+//<br>
+// <b>COMPILATION</b>:<br>
+// Create empty &quot;Win32 Console Application&quot; project, and<br>
+// add this file. Tested with VS2005, but should work<br>
+// with other compilers too.<br>
+//<br>
+// <b>REQUIRES</b>: Windows XP/2000<br>
+//<br>
+// <b>DESCRIPTION</b>:<br>
+// Demonstrates 2 approaches to design of &quot;Memory Boundary<br>
+// Check&quot; feature, which should verify that the application<br>
+// does not access memory outside of dynamically allocated<br>
+// blocks. The feature will be implemented in &quot;Windows Leaks<br>
+// Detector&quot; project, and assumes that our code will receive<br>
+// all calls to HeapAlloc and HeapFree. In current module<br>
+// new allocation functions are called directly.<br>
+// The boundary check is not intended to verify access to<br>
+// statically allocated memory.<br>
+//<br>
+// <b>Approach 1</b>:<br>
+// Allocate bigger memory buffer than requested, and write<br>
+// signature block before and after the returned chunk.<br>
+// When the memory is released by application - verify that<br>
+// signature blocks are unchanged.<br>
+// (+) low memory overhead<br>
+// (+) no run-time overhead<br>
+// (+) checks both beginning and end of block<br>
+// (-) does not alert until the memory is released<br>
+// (-) checks write operations only<br>
+//<br>
+// <b>Approach 2</b>:<br>
+// Allocate block of N+1 pages, where N is the minimal number<br>
+// of full pages to contain the requested buffer size. The<br>
+// extra page will be protected by <a class=comment href="http://msdn.microsoft.com/library/default.asp?url=/library/en-us/memory/base/memory_protection_constants.asp">PAGE_GUARD</a> flag, and the<br>
+// pointer returned to the user will be calculated so the<br>
+// requested buffer will end at the end of last &quot;unguarded&quot;<br>
+// page - so next byte after the block will be located in<br>
+// the guarded page. Any attempt to access the memory after<br>
+// the allocated block will generate  <a class=comment href="http://msdn.microsoft.com/library/default.asp?url=/library/en-us/debug/base/getexceptioncode.asp">STATUS_GUARD_PAGE_VIOLATION</a><br>
+// exception.<br>
+// (+) no run-time overhead<br>
+// (+) alerts at the time of out-of-bound access, when the<br>
+// full call stack is available<br>
+// (+) checks both read and write access<br>
+// (-) high memory overhead (may cause run-time overhead),<br>
+// depends on the page size (the default in XP/2000 is 4K).<br>
+// (-) checks only overflow at the end of the block (in<br>
+// similar way the beginning of the block can be protected,<br>
+// but not both at same time, unless the size of allocated<br>
+// block is multiple of page size)<br>
+// NOTE: when the memory overflow in not acceptable, this<br>
+// technique can be applied to part of allocations:<br>
+// 1. Only for allocation of buffers over certain size. This<br>
+// way the ratio between requested and allocated memory will<br>
+// be limited. Anyway, we are mostly interested in overflow<br>
+// control when arrays (e.g. string buffers) are allocated.<br>
+// 2. Only for cases where the 1st approach indicated an<br>
+// overflow, and we want to find the violating code.<br>
+// <br>
+////////////////////////////////////////////////////////////<br>
+<br>
+<br>
+// Following define is required in order to compile<br>
+// exception-related code.<br>
+// See MSDN for <a class=comment href="http://msdn.microsoft.com/library/default.asp?url=/library/en-us/debug/base/addvectoredexceptionhandler.asp">AddVectoredExceptionHandler</a><br>
+</font>
+<font class=keyword>#define</font> _WIN32_WINNT 0x0500 <br>
+<br>
+<font class=keyword>#include</font> <font class=string>&lt;windows.h&gt;</font><br>
+<font class=keyword>#include</font> <font class=string>&lt;stdio.h&gt;</font><br>
+<font class=keyword>#include</font> <font class=string>&lt;malloc.h&gt;</font><br>
+<font class=keyword>#include</font> <font class=string>&lt;list&gt;</font><br>
+<br>
+<br>
+<font class='comment'>
+//////////////////////////////////////////////////////////<br>
+// <br>
+// IMPLMENTATION OF 1st APPROACH<br>
+// Signature blocks<br>
+//<br>
+//////////////////////////////////////////////////////////<br>
+</font>
+<br>
+<font class='comment'>
+// defines the signature to be placed before and after<br>
+// the actual allocated block<br>
+</font>
+<font class=keyword>static const unsigned char</font> SIGNATURE[] = {0xAB, 0x43, 0xDE, 0x72};<br>
+<font class=keyword>static const unsigned int</font> SIZEOF_SIGNATURE = <font class=keyword>sizeof</font>(SIGNATURE);<br>
+<br>
+<br>
+<font class='comment'>
+///////////////////////////////////////////////<br>
+// This function will replace the regular &quot;malloc&quot;. In this<br>
+// example the &quot;main&quot; function will invoke it directly, but<br>
+// in &quot;Windows Leaks Detector&quot; project this code can be placed<br>
+// inside the hook function for HeapAlloc<br>
+///////////////////////////////////////////////<br>
+</font>
+<font class=keyword>void</font> * <font class=function>malloc_signature</font>(size_t size)<br>
+{<br>
+<font class='comment'>
+&nbsp;&nbsp;&nbsp;&nbsp;// The actual allocated block will contain:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// + the memory block to be returned to the user<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// + 2 signature borders - before and after user's block<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// + additional size_t value, to store the size of the<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// block which the user requested. Note, that, when<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// integrated to Leaks Detector, this field will<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// not be required, as anyway the size is stored as<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// part of internal structures.<br>
+</font>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class=keyword>char</font> * tmp = (<font class=keyword>char</font> *) <font class=function>malloc</font>(size + (SIZEOF_SIGNATURE * 2) + <font class=keyword>sizeof</font>(size_t));<br>
+&nbsp;&nbsp;&nbsp;&nbsp;if (tmp == NULL) <font class=keyword>return</font> NULL;<br>
+<br>
+<font class='comment'>
+&nbsp;&nbsp;&nbsp;&nbsp;// Layout of the memory block will be:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// [size of data][signature border][user's data][signature border]<br>
+</font>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='comment'>// Store the size of user's block<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;*<font class=keyword>reinterpret_cast</font>&lt;size_t*&gt;(tmp) = size; <br>
+&nbsp;&nbsp;&nbsp;&nbsp;tmp += <font class=keyword>sizeof</font>(size_t);<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='comment'>// Store the signature before the block<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class=function>memcpy</font>(tmp, SIGNATURE, SIZEOF_SIGNATURE);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;tmp += SIZEOF_SIGNATURE; <font class='comment'>// now &quot;tmp&quot; points to beginning of user's data</font><br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='comment'>// Store the signature after the block<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class=function>memcpy</font>(tmp + size, SIGNATURE, SIZEOF_SIGNATURE);<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='comment'>// Return the pointer to user's data<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class=keyword>return</font> tmp;<br>
+}<br>
+<br>
+<br>
+<font class='comment'>
+///////////////////////////////////////////////<br>
+// free_signature is called to release blocks,<br>
+// allocated by malloc_signature. For Leaks Detector<br>
+// project this code will be executed as part of<br>
+// hook function for HeapFree, when the block<br>
+// will be identified as having signature protection<br>
+// (based on internal data for allocation block)<br>
+///////////////////////////////////////////////<br>
+</font>
+<font class='keyword'>void</font> <font class='function'>free_signature</font>(void * p)<br>
+{<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>char</font> * orig = <font class='keyword'>static_cast</font>&lt;<font class='keyword'>char</font>*&gt;(p);<br>
+<br>
+<font class='comment'>
+&nbsp;&nbsp;&nbsp;&nbsp;// the pointer returned to the user in &quot;malloc_signature&quot;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// is shifted by size of (int + signature block)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// from the beginning of actual block allocated by<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// &quot;malloc&quot; (or HeapAlloc in general), so we need<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// to restore the original pointer.<br>
+</font>
+&nbsp;&nbsp;&nbsp;&nbsp;orig -= (SIZEOF_SIGNATURE + <font class='keyword'>sizeof</font>(size_t));<br>
+<br>
+<font class='comment'>
+&nbsp;&nbsp;&nbsp;&nbsp;// read the size of user's block<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// in Leaks Detector application this data will be<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// stored as part of info for allocation block<br>
+</font>
+&nbsp;&nbsp;&nbsp;&nbsp;size_t allocation_size = *(<font class='keyword'>reinterpret_cast</font>&lt;size_t*&gt;(orig));<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='comment'>// verify that signature blocks were unchanged<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>bool</font> bStartOK = (0 == <font class='function'>memcmp</font>(orig + <font class='keyword'>sizeof</font>(size_t), SIGNATURE, SIZEOF_SIGNATURE));<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>bool</font> bEndOK = (0 == <font class='function'>memcmp</font>(orig + <font class='keyword'>sizeof</font>(size_t) + allocation_size + SIZEOF_SIGNATURE, SIGNATURE, SIZEOF_SIGNATURE));<br>
+<br>
+<font class='comment'>
+&nbsp;&nbsp;&nbsp;&nbsp;// print error message if one of the signature<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// blocks (or both) were changed<br>
+</font>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>if</font> (!bStartOK) {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>if</font> (!bEndOK) {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>printf</font>(<font class='string'>&quot;Warning: block of size %d is corrupt - before and after\n&quot;</font>, allocation_size);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} <font class='keyword'>else</font> {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>printf</font>(<font class='string'>&quot;Warning: block of size %d is corrupt - before\n&quot;</font>, allocation_size);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+&nbsp;&nbsp;&nbsp;&nbsp;} <font class='keyword'>else if</font> (!bEndOK) {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>printf</font>(<font class='string'>&quot;Warning: block of size %d is corrupt - after\n&quot;</font>, allocation_size);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='comment'>// release the original bloch, allocated by &quot;malloc&quot;</font><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>free</font> (orig);<br>
+}<br>
+<br>
+<font class='comment'>
+<br>
+//////////////////////////////////////////////////////////<br>
+// <br>
+// IMPLMENTATION OF 2nd APPROACH<br>
+// Guarded pages<br>
+//<br>
+//////////////////////////////////////////////////////////<br>
+<br>
+<br>
+///////////////////////////////////////////////<br>
+// This function will be invoked automatically<br>
+// by Windows each time an exception occurs,<br>
+// even before it reaches frame-based application<br>
+// exception handler (such as try-catch in C++).<br>
+// Only when the application is being debugged, the<br>
+// debugger will get a notification first - which is<br>
+// even better, as a live call stack and all relevant<br>
+// context will be available.<br>
+///////////////////////////////////////////////<br>
+</font>
+LONG WINAPI <font class='function'>MyExceptionsHandler</font>(PEXCEPTION_POINTERS ExceptionInfo)<br>
+{<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='comment'>// check the type of exception<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>if</font> (ExceptionInfo-&gt;ExceptionRecord-&gt;ExceptionCode == STATUS_GUARD_PAGE_VIOLATION) 
+{<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>printf</font>(<font class='string'>&quot;Access violation caught - print call stack, activate a breakpoint etc.\n&quot;</font>);<br>
+<br>
+<font class='comment'>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;// when STATUS_GUARD_PAGE_VIOLATION exception is raised, the<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;// protection of the page is automatically reset to READ/WRITE,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;// so next attempt to access same memory won't fail<br>
+</font>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>return</font> EXCEPTION_CONTINUE_EXECUTION;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='comment'>// unknown exception - find next exceptions' handler<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>return</font> EXCEPTION_CONTINUE_SEARCH;<br>
+}<br>
+<br>
+<br>
+<font class='comment'>// global variable to hold handle to exception handle<br></font>
+PVOID gExHandler = NULL;<br>
+<br>
+<font class='comment'>// global variable, which will receive system page size<br></font>
+DWORD gPageSize = 0;<br>
+<br>
+<br>
+<font class='comment'>
+///////////////////////////////////////////////<br>
+// This function must be called before any<br>
+// protected allocation is made.<br>
+// It will initialize all global variables, and <br>
+// set the exception handler.<br>
+///////////////////////////////////////////////<br>
+</font>
+<font class='keyword'>void</font> <font class='function'>protected_init</font>()<br>
+{<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='comment'>// query the System Info in order to get page size<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;SYSTEM_INFO si;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;::<font class='function'>GetSystemInfo</font>(&amp;si);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;gPageSize = si.dwPageSize;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>printf</font>(<font class='string'>&quot;Page size is: %ld\n&quot;</font>, gPageSize);<br>
+<br>
+<font class='comment'>
+&nbsp;&nbsp;&nbsp;&nbsp;// set &quot;MyExceptionsHandler&quot; function as the first<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// exception handler. In case of memory access violation<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// we want out function to be called, while the<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// call stack remain unchanged.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// Notes:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// 1) In order for this code to compile, we had to put<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// #define _WIN32_WINNT 0x0500 <br>
+&nbsp;&nbsp;&nbsp;&nbsp;// at the beginning of the file, before the include of<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// &lt;windows.h&gt; header.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// 2) There should be a clean-up function, which will<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// call &quot;RemoveVectoredExceptionHandler&quot; with returned<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// handler. In current code it is not implemented.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// 3) If there's a debugger attached to this process, it<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// will receive the notification before our handler.<br>
+</font>
+&nbsp;&nbsp;&nbsp;&nbsp;gExHandler = ::<font class='function'>AddVectoredExceptionHandler</font>(1 <font class='comment'>/*call me first*/</font>, MyExceptionsHandler);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>if</font> (gExHandler == NULL)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>printf</font>(<font class='string'>&quot;Failed to set MyExceptionsHandler\n&quot;</font>);<br>
+}<br>
+<br>
+<br>
+<font class='comment'>
+///////////////////////////////////////////////<br>
+// Similary to &quot;malloc_signature&quot;, this function<br>
+// will be invoked by &quot;main&quot; instead of a call<br>
+// to malloc/new. In &quot;Windows Leaks Detector&quot; project<br>
+// this code can be placed inside the hook function<br>
+// for HeapAlloc<br>
+///////////////////////////////////////////////<br>
+</font>
+<font class='keyword'>void</font> * <font class='function'>malloc_protected</font>(size_t size)<br>
+{<br>
+<font class='comment'>
+&nbsp;&nbsp;&nbsp;&nbsp;// calculate the number of full pages required to cover<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// the requested data size.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// (size / gPageSize) will give the number of full<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pages contained in &quot;size&quot;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// (size % gPageSize) will be bigger than 0 in case<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;there's a reminder of division<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// operation - additional page is required<br>
+</font>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>unsigned int</font> iTotalPagesForData = ((<font class='keyword'>unsigned long</font>)size / gPageSize) +<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;((<font class='keyword'>unsigned long</font>)size % gPageSize == 0) ? 0 : 1;<br>
+<br>
+<font class='comment'>
+&nbsp;&nbsp;&nbsp;&nbsp;// allocate virtual memory of size &quot;iTotalPagesForData + 1&quot; pages,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// to accomodate the requesed buffer + guarded page.<br>
+</font>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>char</font> * pRegionStart = (<font class='keyword'>char</font>*) ::<font class='function'>VirtualAlloc</font>(NULL, (iTotalPagesForData +1 ) * gPageSize, MEM_COMMIT, PAGE_READWRITE);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>if</font> (pRegionStart == NULL) {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>printf</font>(<font class='string'>&quot;VirtualAlloc returned NULL\n&quot;</font>);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>return</font> NULL;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+<br>
+<font class='comment'>
+&nbsp;&nbsp;&nbsp;&nbsp;// set PAGE_GUARD protection on last allocated page. On any<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// read/write access to this page STATUS_GUARD_PAGE_VIOLATION<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// exception will be raised.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// Notes:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// 1) VirtualProtection can't be set on part of a page,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// but only on whole pages. For this reason we can't<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// just set protection on a &quot;border&quot; around allocated<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// block, and have to allocate much more memory<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// then requested by user.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// 2) After the exception is raised, the page permissions will<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// be changed to PAGE_READWRITE, as we specified<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// (PAGE_GUARD | PAGE_READWRITE) protection.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// For this reason PAGE_GUARD flag can't be used alone,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// but has to be or'ed with other flag.<br>
+</font>
+&nbsp;&nbsp;&nbsp;&nbsp;DWORD dwOldProtect;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>if</font> (! ::<font class='function'>VirtualProtect</font>(pRegionStart + (iTotalPagesForData * gPageSize), gPageSize, PAGE_GUARD | PAGE_READWRITE, &amp;dwOldProtect)) {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>printf</font>(<font class='string'>&quot;VirtualProtecd failrd\n&quot;</font>);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>return</font> NULL;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+<br>
+<font class='comment'>
+&nbsp;&nbsp;&nbsp;&nbsp;// when we will go &quot;size&quot; bytes back from the guarded page,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// we will promise that the the pointer returned to user<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// points to a safe buffer of requested size, but the first<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// byte after this buffer is guarded.<br>
+</font>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>return</font> pRegionStart + (iTotalPagesForData * gPageSize - size);<br>
+}<br>
+<br>
+<br>
+<font class='comment'>
+///////////////////////////////////////////////<br />
+// Releases memory allocated by "malloc_protected"<br />
+///////////////////////////////////////////////<br />
+</font>
+<font class='keyword'>void</font> <font class='function'>free_protected</font>(<font class='keyword'>void</font> *p)<br>
+{<br>
+<font class='comment'>
+&nbsp;&nbsp;&nbsp;&nbsp;// query the address of the page containing &quot;p&quot;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// Instead, we could keep the original address<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// returned by VirtualAlloc as part of the info<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// of allocation block (in Leaks Detector)<br>
+</font>
+&nbsp;&nbsp;&nbsp;&nbsp;MEMORY_BASIC_INFORMATION memInfo;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;::<font class='function'>VirtualQuery</font>(p, &amp;memInfo, sizeof(MEMORY_BASIC_INFORMATION));<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='comment'>// release the memory<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>if</font> (! ::<font class='function'>VirtualFree</font>(memInfo.AllocationBase, 0 <font class='comment'>/*has to be 0 for MEM_RELEASE*/</font>, MEM_RELEASE))<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>printf</font>(<font class='string'>&quot;Failed to release virtual memory\n&quot;</font>);<br>
+}<br>
+<br>
+<br>
+<font class='comment'>
+//////////////////////////////////////////////////////////<br>
+// <br>
+// DEMONSTRATION<br>
+//<br>
+//////////////////////////////////////////////////////////<br>
+</font>
+<br>
+<br>
+<font class='keyword'>int</font> <font class='function'>main</font>()<br>
+{<br>
+<font class='comment'>
+&nbsp;&nbsp;&nbsp;&nbsp;//////////////////////<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// Signature<br>
+&nbsp;&nbsp;&nbsp;&nbsp;//////////////////////<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>char</font> * arr10 = (<font class='keyword'>char</font> *) <font class='function'>malloc_signature</font>(<font class='keyword'>sizeof</font>(<font class='keyword'>char</font>) * 10);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>char</font> * arr11 = (<font class='keyword'>char</font> *) <font class='function'>malloc_signature</font>(<font class='keyword'>sizeof</font>(<font class='keyword'>char</font>) * 11);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>char</font> * arr12 = (<font class='keyword'>char</font> *) <font class='function'>malloc_signature</font>(<font class='keyword'>sizeof</font>(<font class='keyword'>char</font>) * 12);<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;*(arr10 - 1) = <font class='string'>'\0'</font>; <font class='comment'>// 10: overflow before the block<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;arr10[10] = <font class='string'>'\0'</font>; <font class='comment'>&nbsp;&nbsp;&nbsp;// 10: overflow after the block<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;*(arr11 - 1) = <font class='string'>'\0'</font>; <font class='comment'>// 11: overflow before the block<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;arr12[12] = <font class='string'>'\0'</font>; <font class='comment'>&nbsp;&nbsp;&nbsp;// 12: overflow after the block<br></font>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='comment'>// error messages will be printed when releasing the buffers<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>free_signature</font> (arr10);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>free_signature</font> (arr11);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>free_signature</font> (arr12);<br>
+<br>
+<br>
+<font class='comment'>
+&nbsp;&nbsp;&nbsp;&nbsp;//////////////////////<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// Guarded page<br>
+&nbsp;&nbsp;&nbsp;&nbsp;//////////////////////<br>
+</font>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='comment'>// must initialize before first use<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>protected_init</font>();<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>char</font> * parr10 = (<font class='keyword'>char</font> *) <font class='function'>malloc_protected</font>(<font class='keyword'>sizeof</font>(<font class='keyword'>char</font>) * 10);<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='comment'>// valid read/write access<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;parr10[5] = <font class='string'>'\0'</font>;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>char</font> ch = parr10[2];<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='comment'>// read access outside the array - will raise<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// exception and print log message<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;ch = parr10[10];<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='comment'>// no exceptions on next out-of-bounds accesses<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// for same block - GUARD flag was automatially<br>
+&nbsp;&nbsp;&nbsp;&nbsp;// reset after the first exception<br></font>
+&nbsp;&nbsp;&nbsp;&nbsp;ch = parr10[11];<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>free_protected</font>(parr10);<br>
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='function'>printf</font> (<font class='string'>&quot;Done\n&quot;</font>);<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<font class='keyword'>return</font> 0;<br>
+}<br>
+<br>
+<font class='comment'>// EOF<br></font>
+</div>
+<a href="http://sourceforge.net"><img src="http://sflogo.sourceforge.net/sflogo.php?group_id=162307&amp;type=4" width="125" height="37" border="0" alt="SourceForge.net Logo" /></a>
+
+
+<br>
+<!-- Begin Shinystat Free code -->
+<script type="text/javascript" language="JavaScript" SRC="http://codice.shinystat.com/cgi-bin/getcod.cgi?USER=mgopshtein"></script>
+<noscript>
+<A HREF="http://www.shinystat.com" target="_top">
+<IMG SRC="http://www.shinystat.com/cgi-bin/shinystat.cgi?USER=mgopshtein" ALT="Web counter" BORDER="0"></A>
+</noscript>
+<!-- Begin Shinystat Free code -->
+
+<script src="http://www.google-analytics.com/urchin.js" type="text/javascript">
+</script>
+<script type="text/javascript">
+_uacct = "UA-1563197-1";
+urchinTracker();
+</script>
+
+</body>
+</html>
