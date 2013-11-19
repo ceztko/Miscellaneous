@@ -10,7 +10,10 @@ namespace Test
     {
         static void Main(string[] args)
         {
-            TestClass.foo(new FileStream(@"C:\Users\ceztko\Desktop\ciao.txt", FileMode.OpenOrCreate, FileAccess.Write));
+            FileStream write = new FileStream(@"C:\Users\ceztko\Desktop\ciao.txt", FileMode.OpenOrCreate, FileAccess.Write);
+            TestClass.foo(write);
+            write.Close();
+            TestClass.foo2(new FileStream(@"C:\Users\ceztko\Desktop\ciao.txt", FileMode.Open, FileAccess.Read));
         }
     }
 }

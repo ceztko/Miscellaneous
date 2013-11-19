@@ -14,6 +14,6 @@ namespace Interop { namespace Miscellaneous
 	private:
 		StreambufW _buffer;
 	public:
-		FileStreamW(FileStream ^stream, std::size_t buffCapacity = 256, std::size_t putBack = 8);
+		FileStreamW(FileStream ^stream, std::size_t buffCapacity = 256, std::size_t putBackCap = 8);
 	};
 } }

@@ -3,11 +3,29 @@
 using namespace std;
 using namespace Interop::Miscellaneous;
 
-StreambufW::StreambufW(FileStream ^stream, size_t buffCapacity, size_t putBack) :
+/*
+
+  Input Stream Buffer:
+ 
+  [.]  [.]  .. [.]  [.]  [.]  .. [.]  [ ]
+   ^            ^                      ^
+   |            |                      |
+ eback         gptr                  egptr
+
+ Output Stream Buffer:
+
+  [.]  [.]  .. [.]  [.]  [.]  .. [.]  [ ]
+   ^            ^                      ^
+   |            |                      |
+ pbase         pptr                  eeptr
+
+*/
+
+StreambufW::StreambufW(FileStream ^stream, size_t buffCapacity, size_t putBackCap) :
 	_wrapped(stream),
-    _putBack(max(putBack, size_t(1)))
+    _putBackCap(max(putBackCap, size_t(1)))
 {
-	array<Byte> ^buff = gcnew array<Byte>(max(buffCapacity, _putBack) + _putBack);
+	array<Byte> ^buff = gcnew array<Byte>(max(buffCapacity, putBackCap) + putBackCap);
 
 	// The buffer is stored in a GCHandle and not on a gcroot so we can pin it for the
 	// StreambufW istance lifetime
@@ -35,28 +53,40 @@ streambuf::int_type StreambufW::underflow()
 	if (!_wrapped->CanRead)
 		return EOF;
 
+	char *gPtr = gptr();
+	char *egPtr = egptr();
+
 	// buffer not exhausted
-    if (gptr() < egptr())
-        return traits_type::to_int_type(*gptr());
+    if (gPtr < egPtr)
+        return traits_type::to_int_type(*gPtr);
 
     char *base = (char *)_buffHandle.AddrOfPinnedObject().ToPointer();
-    char *start = base;
 
-    if (eback() == base) // true when this isn't the first fill
+	char *eBack = eback();
+	char *eBackNext = base;
+	char *gPtrNext = base;
+    if (eBack == base) // true when this isn't the first fill
     {
-        // Make arrangements for putback characters
-        memmove(base, egptr() - _putBack, _putBack);
-        start += _putBack;
-    }
+		// Calculate put back area size. It can't be more than its capacity!
+		size_t putBackSize = gPtr - eBack;
+		if (putBackSize > _putBackCap)
+			putBackSize = _putBackCap;
 
-    // start is now the start of the buffer, proper.
-    // Read from FileStream in to the provided buffer
+        // Copy characters to the putback area up to its max size 
+		size_t putBackStartIndex = _putBackCap - putBackSize;
+        memmove(base + putBackStartIndex, egPtr - putBackSize, putBackSize);
+
+		eBackNext = base + putBackStartIndex;
+		char *gPtrNext = base + _putBackCap;
+    }
 
 	size_t n;
 	array<Byte> ^buff = static_cast<array<Byte> ^>(_buffHandle.Target);
 	try
 	{
-		n = _wrapped->Read(buff, 0, buff->Length - (start - base));
+		// Read from FileStream in to the provided buffer. If this is not the first fill,
+		// the max capacity of the put back area is the offset where to start read
+		n = _wrapped->Read(buff, gPtrNext - base, buff->Length - _putBackCap);
 	}
 	catch (...)
 	{
@@ -66,10 +96,12 @@ streambuf::int_type StreambufW::underflow()
     if (n == 0)
         return traits_type::eof();
 
-    // Set buffer pointers
-    setg(base, start, start + n);
+	char *egPtrNext = gPtrNext + n;
 
-    return traits_type::to_int_type(*gptr());
+    // Set the new buffer pointers
+    setg(eBackNext, gPtrNext, egPtrNext);
+
+    return traits_type::to_int_type(*egPtrNext);
 }
 
 streambuf::int_type StreambufW::overflow(int_type c)

@@ -11,15 +11,16 @@ using namespace System::Runtime::InteropServices;
 
 namespace Interop { namespace Miscellaneous
 {
-	// Reference: http://www.mr-edd.co.uk/blog/beginners_guide_streambuf
+	// Started from: http://www.mr-edd.co.uk/blog/beginners_guide_streambuf
+	// Ideas from USC Groovx: http://ilab.usc.edu/rjpeters/groovx/stdiobuf_8cc-source.html
 	class StreambufW: public std::streambuf
 	{
 	private:
 		gcroot<FileStream ^> _wrapped;
-        const std::size_t _putBack;
+        const std::size_t _putBackCap;
 		GCHandle _buffHandle;
 	public:
-		StreambufW(FileStream ^stream, std::size_t buffCapacity, std::size_t putBack);
+		StreambufW(FileStream ^stream, std::size_t buffCapacity, std::size_t putBackCap);
 		~StreambufW();
         virtual int_type underflow();
         virtual int_type overflow(int_type c);

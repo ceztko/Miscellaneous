@@ -16,7 +16,15 @@ namespace Test
 		{
 			iostream &test = FileStreamW(stream);
 
-			test << "Ciao";
+			test << "CiaoPorcoCazzoQuindi";
+		}
+
+		static void foo2(FileStream ^stream)
+		{
+			iostream &test = FileStreamW(stream, 8, 8);
+
+			char buf[20];
+			test.read(buf, 20);
 		}
 	};
 }
