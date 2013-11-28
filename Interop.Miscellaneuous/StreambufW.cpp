@@ -60,6 +60,7 @@ streambuf::int_type StreambufW::underflow()
     if (gPtr < egPtr)
         return traits_type::to_int_type(*gPtr);
 
+	// Begin of the buffer
     char *base = (char *)_buffHandle.AddrOfPinnedObject().ToPointer();
 
 	char *eBack = eback();
@@ -72,12 +73,12 @@ streambuf::int_type StreambufW::underflow()
 		if (putBackSize > _putBackCap)
 			putBackSize = _putBackCap;
 
-        // Copy characters to the putback area up to its max size 
+        // Copy characters to the putback area up to its max capacity 
 		size_t putBackStartIndex = _putBackCap - putBackSize;
         memmove(base + putBackStartIndex, egPtr - putBackSize, putBackSize);
 
-		eBackNext = base + putBackStartIndex;
-		char *gPtrNext = base + _putBackCap;
+		eBackNext = base + putBackStartIndex; // Begin of putback area
+		char *gPtrNext = base + _putBackCap;  // Set read position after putback area
     }
 
 	size_t n;
@@ -85,7 +86,8 @@ streambuf::int_type StreambufW::underflow()
 	try
 	{
 		// Read from FileStream in to the provided buffer. If this is not the first fill,
-		// the max capacity of the put back area is the offset where to start read
+		// the max capacity of the put back area is the offset where to start writing
+		// in the buffer
 		n = _wrapped->Read(buff, gPtrNext - base, buff->Length - _putBackCap);
 	}
 	catch (...)
@@ -96,6 +98,7 @@ streambuf::int_type StreambufW::underflow()
     if (n == 0)
         return traits_type::eof();
 
+	// Set the end of the buffer after putback area + n bytes read
 	char *egPtrNext = gPtrNext + n;
 
     // Set the new buffer pointers
