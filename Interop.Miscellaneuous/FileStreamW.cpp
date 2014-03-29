@@ -1,3 +1,6 @@
+// Copyright (c) 2013 Francesco Pretto
+// This file is subject to the MIT license
+
 #include "FileStreamW.h"
 
 using namespace std;
